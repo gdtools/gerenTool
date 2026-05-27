@@ -1,3 +1,4 @@
+use crate::db;
 use crate::menu::{MenuItem, all_menus};
 use crate::pages::{
     AppearancePage, GeneralPage, GenericPage, NetworkPage, NotificationsPage, PrivacyPage,
@@ -5,12 +6,15 @@ use crate::pages::{
 };
 use crate::screenshot::feature::screenshot::AppMode;
 use crate::screenshot::feature::screenshot::ScreenshotFeature;
+use crate::screenshot::feature::screenshot::state::WindowPrevState;
+use crate::screenshot::hotkey::HotkeyAction;
 use crate::screenshot::model::state::CommonState;
 use crate::screenshot::{ScreenshotManager, create_screenshot_state};
+use crate::tray::{TrayAction, TrayController};
 use eframe::egui::{self, FontData, FontDefinitions, FontFamily};
+use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use std::collections::HashMap;
 use std::sync::Arc;
-use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 
 /// 设置应用主结构体
 pub struct SettingsApp {
@@ -28,14 +32,24 @@ pub struct SettingsApp {
     screenshot_feature: ScreenshotFeature,
     /// 截图共享状态
     screenshot_common: Option<CommonState>,
+    /// 系统托盘（持有期间托盘图标可见）
+    tray: Option<TrayController>,
     /// 是否已完成初始化（首帧后设置）
     initialized: bool,
+    /// 用户主动选择"退出"标志（区分关闭按钮 / 托盘退出菜单）
+    user_quit_requested: bool,
+    /// 当前已应用的主题（用于避免每帧重复设置）
+    current_dark_mode: bool,
 }
 
 impl SettingsApp {
     /// 创建新的应用实例
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
         setup_fonts(&cc.egui_ctx);
+
+        // 根据数据库主题配置应用 visuals（"1"=深色，"0"=浅色，默认深色）
+        let dark = db::get_sys_config(db::K_THEME).unwrap_or_else(|| "1".to_string()) == "1";
+        apply_theme(&cc.egui_ctx, dark);
 
         let menus = all_menus();
         let current_menu_id = menus.first().map(|m| m.id.to_string()).unwrap_or_default();
@@ -60,7 +74,16 @@ impl SettingsApp {
             }
         }
 
-        let (window_state, common_state) = create_screenshot_state(hwnd_usize);
+        let (_window_state, common_state) = create_screenshot_state(hwnd_usize);
+
+        // 创建托盘（失败时仅记录错误，程序继续运行）
+        let tray = match TrayController::new() {
+            Ok(t) => Some(t),
+            Err(e) => {
+                tracing::error!("创建系统托盘失败: {:?}", e);
+                None
+            }
+        };
 
         Self {
             current_menu_id,
@@ -70,7 +93,10 @@ impl SettingsApp {
             screenshot_manager: None,
             screenshot_feature: ScreenshotFeature::new(),
             screenshot_common: Some(common_state),
+            tray,
             initialized: false,
+            user_quit_requested: false,
+            current_dark_mode: dark,
         }
     }
 
@@ -82,8 +108,55 @@ impl SettingsApp {
         self.initialized = true;
 
         if let Some(common_state) = &self.screenshot_common {
-            let screenshot_manager = ScreenshotManager::new(ctx, Arc::clone(&common_state.window_state));
+            let screenshot_manager =
+                ScreenshotManager::new(ctx, Arc::clone(&common_state.window_state));
             self.screenshot_manager = Some(screenshot_manager);
+        }
+    }
+
+    /// 处理托盘事件
+    ///
+    /// - Screenshot：等价于按下截图热键（伪造 HotkeyAction）
+    /// - ShowSettings：显示主窗口并置顶
+    /// - Quit：标记用户主动退出，发起 Close 流程
+    fn handle_tray_actions(&mut self, ctx: &egui::Context) {
+        let Some(tray) = &self.tray else { return };
+        let actions = tray.poll();
+        for action in actions {
+            match action {
+                TrayAction::Screenshot => {
+                    // 模拟热键路径：先确保窗口处于已知状态再进入截图模式
+                    // 直接使用 WindowPrevState::Tray 让截图模块识别"原本最小化/隐藏"
+                    if self.mode != AppMode::Screenshot {
+                        if let Some(new_mode) =
+                            self.screenshot_feature.handle_hotkey(HotkeyAction::SetScreenshotMode {
+                                prev_state: WindowPrevState::Normal,
+                            })
+                        {
+                            self.mode = new_mode;
+                            if let Some(m) = &mut self.screenshot_manager {
+                                m.set_active(true);
+                            }
+                        }
+                    }
+                }
+                TrayAction::ShowSettings => {
+                    // 让窗口重新显示并获得焦点
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+                }
+                TrayAction::Quit => {
+                    // 标记允许真正退出
+                    self.user_quit_requested = true;
+                    if let Some(common) = &self.screenshot_common {
+                        if let Ok(mut allow) = common.window_state.allow_quit.lock() {
+                            *allow = true;
+                        }
+                    }
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                }
+            }
         }
     }
 }
@@ -114,11 +187,10 @@ fn setup_fonts(ctx: &egui::Context) {
             .push("msyh".to_owned());
     }
 
-    // 注册 phosphor 图标字体（将字体数据插入并添加到 Proportional 回退链）
+    // 注册 phosphor 图标字体
     egui_phosphor::add_to_fonts(&mut fonts, egui_phosphor::Variant::Regular);
 
-    // 为工具栏显式创建 phosphor-regular 命名字体系列
-    // toolbar.rs 中通过 FontFamily::Name("phosphor-regular") 引用此字体
+    // 工具栏使用的命名字体系列
     fonts.families.insert(
         FontFamily::Name("phosphor-regular".into()),
         vec!["phosphor".to_owned()],
@@ -127,17 +199,44 @@ fn setup_fonts(ctx: &egui::Context) {
     ctx.set_fonts(fonts);
 }
 
+/// 根据 dark 标志应用 egui 视觉主题
+///
+/// - dark=true  → 使用内置 dark 主题
+/// - dark=false → 使用内置 light 主题
+fn apply_theme(ctx: &egui::Context, dark: bool) {
+    if dark {
+        ctx.set_visuals(egui::Visuals::dark());
+    } else {
+        ctx.set_visuals(egui::Visuals::light());
+    }
+}
+
 impl eframe::App for SettingsApp {
     /// 每帧逻辑更新（在 UI 渲染之前调用）
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.ensure_initialized(ctx);
 
-        // 处理窗口关闭事件
+        // 处理托盘事件（必须每帧 poll，事件来自后台线程）
+        self.handle_tray_actions(ctx);
+
+        // 处理窗口关闭事件：除非用户主动选择退出，否则一律最小化到托盘
         let close_requested = ctx.input(|i| i.viewport().close_requested());
         if close_requested {
             if self.mode == AppMode::Screenshot {
+                // 截图模式下拦截关闭
                 ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
-            } else if let Some(ref common) = self.screenshot_common {
+            } else if !self.user_quit_requested {
+                // 非主动退出 → 取消关闭，隐藏窗口到托盘
+                ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+                ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+                // 同步内部 visible 状态，让热键模块知道窗口已隐藏（用于从托盘恢复）
+                if let Some(common) = &self.screenshot_common {
+                    if let Ok(mut v) = common.window_state.visible.lock() {
+                        *v = false;
+                    }
+                }
+            } else if let Some(common) = &self.screenshot_common {
+                // 用户主动退出：放行
                 if let Ok(mut allow) = common.window_state.allow_quit.lock() {
                     *allow = true;
                 }
@@ -168,8 +267,7 @@ impl eframe::App for SettingsApp {
 
     /// 每帧 UI 渲染
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
-        // 置顶贴图必须在每帧无条件渲染（无论当前模式），
-        // 否则截图关闭后 mode=Idle，贴图窗口将不再被维护而变成孤儿窗口
+        // 置顶贴图必须在每帧无条件渲染
         self.screenshot_feature.show_pinned_viewports(ui.ctx());
 
         if self.mode == AppMode::Screenshot {
@@ -194,9 +292,10 @@ impl eframe::App for SettingsApp {
 
                 for menu in &self.menus {
                     let is_selected = menu.id == selected_id;
-                    let response = ui.add(
-                        egui::Button::selectable(is_selected, format!("{} {}", menu.icon, menu.label)),
-                    );
+                    let response = ui.add(egui::Button::selectable(
+                        is_selected,
+                        format!("{} {}", menu.icon, menu.label),
+                    ));
                     if response.clicked() {
                         new_selected_id = menu.id.to_string();
                     }
@@ -206,10 +305,23 @@ impl eframe::App for SettingsApp {
         self.current_menu_id = new_selected_id;
 
         // 渲染中央面板
+        let mut pending_theme: Option<bool> = None;
         egui::CentralPanel::default().show_inside(ui, |ui| {
             if let Some(page) = self.pages.get_mut(&self.current_menu_id) {
-                page.render(ui);
+                let out = page.render(ui);
+                if let Some(dark) = out.theme_changed {
+                    pending_theme = Some(dark);
+                }
             }
         });
+
+        // 应用主题变更（在所有 UI 渲染完成后再设置 visuals，避免本帧 UI 不一致）
+        if let Some(dark) = pending_theme {
+            if dark != self.current_dark_mode {
+                self.current_dark_mode = dark;
+                apply_theme(ui.ctx(), dark);
+                ui.ctx().request_repaint();
+            }
+        }
     }
 }
