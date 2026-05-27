@@ -5,6 +5,19 @@ use eframe::egui::{
 use image::RgbaImage;
 use std::collections::HashMap;
 
+/// 投影阴影层定义：(偏移像素, alpha 值)
+/// 从近到远排列，越远偏移越大、透明度越高（alpha 越低）
+const SHADOW_LAYERS: [(f32, u8); 5] = [
+    (1.0, 30),
+    (2.0, 22),
+    (3.0, 16),
+    (4.0, 10),
+    (5.0, 5),
+];
+
+/// 阴影最大扩展像素，视口需要为此预留空间
+const SHADOW_SPREAD: f32 = SHADOW_LAYERS[SHADOW_LAYERS.len() - 1].0;
+
 /// 单个置顶贴图的运行时状态
 #[derive(Clone)]
 pub struct PinnedImage {
@@ -83,10 +96,10 @@ impl PinnedImageManager {
                 }
             });
 
-            // 物理像素 → 父视口逻辑像素 → 再乘当前缩放
+            // 物理像素 → 父视口逻辑像素 → 再乘当前缩放 → 加上阴影扩展空间
             let logical_size = Vec2::new(
-                item.image.width() as f32 / parent_ppp * item.scale,
-                item.image.height() as f32 / parent_ppp * item.scale,
+                item.image.width() as f32 / parent_ppp * item.scale + SHADOW_SPREAD,
+                item.image.height() as f32 / parent_ppp * item.scale + SHADOW_SPREAD,
             );
 
             let builder = ViewportBuilder::default()
@@ -124,21 +137,41 @@ impl PinnedImageManager {
 
                         let full_rect = ui.max_rect();
 
-                        // 分配一个铺满窗口的响应区，开启 click_and_drag 以同时支持
-                        // 点击关闭、拖动窗口、右键菜单
-                        let response = ui.allocate_rect(full_rect, Sense::click_and_drag());
+                        // 贴图本体区域：从左上角开始，右下留出阴影扩展空间
+                        let image_rect = Rect::from_min_max(
+                            full_rect.min,
+                            Pos2::new(
+                                full_rect.max.x - SHADOW_SPREAD,
+                                full_rect.max.y - SHADOW_SPREAD,
+                            ),
+                        );
 
-                        // 绘制贴图本体（铺满整个窗口）
+                        // 绘制投影阴影层（在贴图本体下方）
+                        // 每层向右下偏移，alpha 逐渐降低，模拟自然光照投影
+                        for &(offset, alpha) in &SHADOW_LAYERS {
+                            let shadow_rect = image_rect.translate(Vec2::new(offset, offset));
+                            ui.painter().rect_filled(
+                                shadow_rect,
+                                0.0,
+                                Color32::from_black_alpha(alpha),
+                            );
+                        }
+
+                        // 分配一个覆盖贴图本体的响应区，开启 click_and_drag 以同时支持
+                        // 点击关闭、拖动窗口、右键菜单（阴影区域不响应交互）
+                        let response = ui.allocate_rect(image_rect, Sense::click_and_drag());
+
+                        // 绘制贴图本体
                         ui.painter().image(
                             texture.id(),
-                            full_rect,
+                            image_rect,
                             Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
                             Color32::WHITE,
                         );
 
                         // 绘制 1 像素细描边便于辨识贴图边界
                         ui.painter().rect_stroke(
-                            full_rect,
+                            image_rect,
                             0.0,
                             Stroke::new(1.0, Color32::from_black_alpha(80)),
                             StrokeKind::Inside,
@@ -205,8 +238,8 @@ impl PinnedImageManager {
                                 cctx.data_mut(|d| d.insert_temp(zoom_key, new_scale));
                                 
                                 let new_logical_size = Vec2::new(
-                                    image.width() as f32 / parent_ppp * new_scale,
-                                    image.height() as f32 / parent_ppp * new_scale,
+                                    image.width() as f32 / parent_ppp * new_scale + SHADOW_SPREAD,
+                                    image.height() as f32 / parent_ppp * new_scale + SHADOW_SPREAD,
                                 );
                                 cctx.send_viewport_cmd_to(viewport_id, ViewportCommand::InnerSize(new_logical_size));
                                 cctx.request_repaint();
