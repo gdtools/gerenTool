@@ -74,6 +74,19 @@ pub fn handle_interaction(
         return ScreenshotAction::SaveToClipboard;
     }
 
+    // 左键单击处理（双击时跳过，避免与 double_clicked 冲突）
+    if response.clicked() && !response.double_clicked() {
+        handle_click(
+            ui,
+            state,
+            canvas_state,
+            global_offset_phys,
+            ppp,
+            toolbar_rect,
+            &response,
+        );
+    }
+
     // 拖拽事件处理（仅在指针不在工具栏 UI 上时）
     if let Some(press_pos) = response.interact_pointer_pos()
         && !is_hovering_ui
@@ -177,8 +190,8 @@ fn handle_click(
             canvas_state.selected_shape = None;
         }
 
-        // 有选区且有图形时，不重新选择区域
-        if state.select.selection.is_some() && !state.edit.shapes.is_empty() {
+        // 已有选区时不重新选择窗口/屏幕（防止单击重置选区）
+        if state.select.selection.is_some() {
             return;
         }
 

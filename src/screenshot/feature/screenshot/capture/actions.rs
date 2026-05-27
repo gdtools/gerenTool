@@ -146,9 +146,20 @@ pub(super) fn handle_save_action(
                         tracing::info!("Copied image to clipboard.");
                     }
                 } else if final_action == ScreenshotAction::SaveAs {
-                    // 弹出文件保存对话框并保存
+                    // 弹出文件保存对话框并保存，默认文件名与"保存到桌面"规则相同
+                    let secs = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_secs();
+                    let tz_offset_secs = get_local_tz_offset_secs();
+                    let local_secs = secs as i64 + tz_offset_secs;
+                    let (y, mo, d, h, mi, s) = secs_to_datetime(local_secs);
+                    let default_name = format!(
+                        "PIC_{:04}-{:02}-{:02}_{:02}_{:02}_{:02}.png",
+                        y, mo, d, h, mi, s
+                    );
                     let file = rfd::FileDialog::new()
-                        .set_file_name("screenshot.png")
+                        .set_file_name(&default_name)
                         .add_filter("PNG 图片", &["png"])
                         .add_filter("JPEG 图片", &["jpg", "jpeg"])
                         .add_filter("BMP 图片", &["bmp"])
