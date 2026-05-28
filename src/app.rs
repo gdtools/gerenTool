@@ -1,15 +1,15 @@
 use crate::db;
-use crate::menu::{MenuItem, all_menus};
+use crate::menu::{all_menus, MenuItem};
 use crate::pages::{
     AppearancePage, GeneralPage, GenericPage, NetworkPage, NotificationsPage, PrivacyPage,
     SettingsPage, StoragePage,
 };
+use crate::screenshot::feature::screenshot::state::WindowPrevState;
 use crate::screenshot::feature::screenshot::AppMode;
 use crate::screenshot::feature::screenshot::ScreenshotFeature;
-use crate::screenshot::feature::screenshot::state::WindowPrevState;
 use crate::screenshot::hotkey::HotkeyAction;
 use crate::screenshot::model::state::CommonState;
-use crate::screenshot::{ScreenshotManager, create_screenshot_state};
+use crate::screenshot::{create_screenshot_state, ScreenshotManager};
 use crate::tray::{TrayAction, TrayController};
 use eframe::egui::{self, FontData, FontDefinitions, FontFamily};
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
@@ -57,14 +57,19 @@ impl SettingsApp {
         let mut pages: HashMap<String, Box<dyn SettingsPage>> = HashMap::new();
         pages.insert("general".into(), Box::new(GeneralPage::default()));
         pages.insert("appearance".into(), Box::new(AppearancePage::default()));
-        pages.insert("notifications".into(), Box::new(NotificationsPage::default()));
+        pages.insert(
+            "notifications".into(),
+            Box::new(NotificationsPage::default()),
+        );
         pages.insert("privacy".into(), Box::new(PrivacyPage::default()));
         pages.insert("network".into(), Box::new(NetworkPage::default()));
         pages.insert("storage".into(), Box::new(StoragePage::default()));
         for menu in &menus {
-            pages
-                .entry(menu.id.to_string())
-                .or_insert_with(|| Box::new(GenericPage { title: menu.label.to_string() }));
+            pages.entry(menu.id.to_string()).or_insert_with(|| {
+                Box::new(GenericPage {
+                    title: menu.label.to_string(),
+                })
+            });
         }
 
         let mut hwnd_usize = 0;
@@ -129,9 +134,10 @@ impl SettingsApp {
                     // 直接使用 WindowPrevState::Tray 让截图模块识别"原本最小化/隐藏"
                     if self.mode != AppMode::Screenshot {
                         if let Some(new_mode) =
-                            self.screenshot_feature.handle_hotkey(HotkeyAction::SetScreenshotMode {
-                                prev_state: WindowPrevState::Tray,
-                            })
+                            self.screenshot_feature
+                                .handle_hotkey(HotkeyAction::SetScreenshotMode {
+                                    prev_state: WindowPrevState::Tray,
+                                })
                         {
                             self.mode = new_mode;
                             if let Some(m) = &mut self.screenshot_manager {
@@ -146,7 +152,12 @@ impl SettingsApp {
                     let pos = ctx.input(|i| {
                         i.viewport()
                             .monitor_size
-                            .map(|size| egui::pos2((size.x - window_size.x) / 2.0, (size.y - window_size.y) / 2.0))
+                            .map(|size| {
+                                egui::pos2(
+                                    (size.x - window_size.x) / 2.0,
+                                    (size.y - window_size.y) / 2.0,
+                                )
+                            })
                             .unwrap_or_else(|| egui::pos2(100.0, 100.0))
                     });
 
@@ -156,6 +167,11 @@ impl SettingsApp {
                         }
                     }
 
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Decorations(true));
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Transparent(false));
+                    ctx.send_viewport_cmd(egui::ViewportCommand::WindowLevel(
+                        egui::WindowLevel::Normal,
+                    ));
                     ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
                     ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(false));
                     ctx.send_viewport_cmd(egui::ViewportCommand::MinInnerSize(min_size));
@@ -206,10 +222,9 @@ fn setup_fonts(ctx: &egui::Context) {
         if let Ok(font_data) = std::fs::read(path) {
             // 关键：from_owned 让 egui 拿走所有权(Arc 管理)，
             // 而不是 Box::leak 永久泄漏 'static 引用
-            fonts.font_data.insert(
-                "cjk".to_owned(),
-                Arc::new(FontData::from_owned(font_data)),
-            );
+            fonts
+                .font_data
+                .insert("cjk".to_owned(), Arc::new(FontData::from_owned(font_data)));
 
             fonts
                 .families

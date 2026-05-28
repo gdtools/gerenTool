@@ -230,12 +230,15 @@ impl Default for ScreenshotDrawingState {
 pub struct ScreenshotRuntimeState {
     /// 视口窗口是否已完成配置（尺寸和位置已稳定）
     pub window_configured: bool,
+    /// 截图前的窗口是否已被同步移动到屏幕外
+    pub window_hidden_for_capture: bool,
 }
 
 impl ScreenshotRuntimeState {
     fn new(_prev_window_state: WindowPrevState) -> Self {
         Self {
             window_configured: false,
+            window_hidden_for_capture: false,
         }
     }
 }

@@ -45,15 +45,18 @@ fn handle_capture_stage(
     ctx: &Context,
     is_active: &mut bool,
     screenshot_state: &mut ScreenshotState,
+    common: &CommonState,
 ) -> bool {
     if !screenshot_state.capture.captures.is_empty() {
         return false;
     }
 
-    // 首次进入捕获阶段：缩小窗口并移到屏幕外，避免遮挡截图
-    if !screenshot_state.capture.is_capturing {
+    // 首次进入捕获阶段：同步把窗口移到屏幕外，避免异步视口命令导致固定等待。
+    if !screenshot_state.runtime.window_hidden_for_capture {
+        current_platform().show_window_restore_offscreen(common.window_state.hwnd_usize);
         ctx.send_viewport_cmd(ViewportCommand::InnerSize(Vec2::ZERO));
         ctx.send_viewport_cmd(ViewportCommand::OuterPosition(hidden_window_pos()));
+        screenshot_state.runtime.window_hidden_for_capture = true;
     }
 
     let should_exit = capture_impl::handle_capture_process(ctx, screenshot_state);
@@ -244,7 +247,7 @@ pub fn prepare_screenshot_frame(
         return false;
     }
 
-    if handle_capture_stage(ctx, is_active, screenshot_state) {
+    if handle_capture_stage(ctx, is_active, screenshot_state, common) {
         return false;
     }
 

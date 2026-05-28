@@ -1,23 +1,125 @@
+use arboard::{Clipboard, ImageData};
 use eframe::egui::{
     self, Color32, Context, Frame, Id, Pos2, Rect, Sense, Stroke, StrokeKind, TextureHandle, Vec2,
     ViewportBuilder, ViewportClass, ViewportCommand, ViewportId, WindowLevel,
 };
 use image::RgbaImage;
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::sync::Arc;
 
-/// 投影阴影层定义：(偏移像素, alpha 值)
-/// 从近到远排列，越远偏移越大、透明度越高（alpha 越低）
-const SHADOW_LAYERS: [(f32, u8); 5] = [
-    (1.0, 30),
-    (2.0, 22),
-    (3.0, 16),
-    (4.0, 10),
-    (5.0, 5),
-];
+/// 阴影向右下扩展的像素数（仅向右、向下，不向上/左扩，避免贴图与截图原位置错位）
+const SHADOW_SPREAD: f32 = 8.0;
 
-/// 阴影最大扩展像素，视口需要为此预留空间
-const SHADOW_SPREAD: f32 = SHADOW_LAYERS[SHADOW_LAYERS.len() - 1].0;
+/// 阴影渐变内侧颜色（紧贴贴图）：接近纯黑
+const SHADOW_INNER: Color32 = Color32::from_rgb(10, 10, 10);
+/// 阴影渐变外侧颜色（远离贴图）：接近纯白
+const SHADOW_OUTER: Color32 = Color32::from_rgb(250, 250, 250);
+
+/// 绘制贴图右、下方向的凸起阴影
+///
+/// 仅向右、向下扩展 SHADOW_SPREAD 像素，使用实色渐变：
+/// 内侧（贴图边缘）= rgb(10,10,10)，外侧 = rgb(250,250,250)。
+/// 右下角通过四角颜色插值，保证两轴渐变自然衔接。
+fn draw_shadow(ui: &egui::Ui, image_rect: Rect) {
+    let spread = SHADOW_SPREAD;
+    let inner = SHADOW_INNER;
+    let outer = SHADOW_OUTER;
+
+    // 右侧条带：水平方向从内（左，inner）到外（右，outer）
+    draw_gradient_rect(
+        ui,
+        Rect::from_min_max(
+            Pos2::new(image_rect.max.x, image_rect.min.y),
+            Pos2::new(image_rect.max.x + spread, image_rect.max.y),
+        ),
+        [inner, outer, inner, outer],
+    );
+
+    // 底部条带：垂直方向从内（上，inner）到外（下，outer）
+    draw_gradient_rect(
+        ui,
+        Rect::from_min_max(
+            Pos2::new(image_rect.min.x, image_rect.max.y),
+            Pos2::new(image_rect.max.x, image_rect.max.y + spread),
+        ),
+        [inner, inner, outer, outer],
+    );
+
+    // 右下角块：以贴图右下角为圆心做径向扇形渐变
+    // 中心 = inner（与两条条带的内边缘颜色一致）
+    // 外圈采样 N 个点 = outer，构成扇形三角剖分
+    // 这样角块上边缘 ≈ 右侧条带内边缘色，左边缘 ≈ 底部条带内边缘色，过渡无色差
+    draw_radial_corner(
+        ui,
+        image_rect.max,
+        spread,
+        inner,
+        outer,
+    );
+}
+
+/// 在 `center` 处绘制一个朝向右下方向、半径为 `radius` 的 1/4 扇形径向渐变
+///
+/// 中心顶点颜色 = inner，外圈顶点颜色 = outer，
+/// 通过细分多个三角形让等距点颜色趋于一致，避免双线性插值带来的对角色差。
+fn draw_radial_corner(ui: &egui::Ui, center: Pos2, radius: f32, inner: Color32, outer: Color32) {
+    if radius <= 0.0 {
+        return;
+    }
+
+    // 扇形细分段数：越大越接近真正径向渐变，8 段已足够平滑
+    const SEGMENTS: usize = 8;
+
+    let mut mesh = egui::Mesh::default();
+    mesh.colored_vertex(center, inner);
+
+    // 外圈沿 1/4 圆采样，但实际外边界需要落在角块的方形外缘上（与条带外侧对齐）
+    // 因此外圈位置取 (cos*radius, sin*radius)，但夹到 [0, radius] 的方框内
+    for i in 0..=SEGMENTS {
+        let t = i as f32 / SEGMENTS as f32;
+        let angle = t * std::f32::consts::FRAC_PI_2; // 0 → π/2，从正下到正右
+        let dx = angle.sin() * radius;
+        let dy = angle.cos() * radius;
+        mesh.colored_vertex(Pos2::new(center.x + dx, center.y + dy), outer);
+    }
+
+    // 构造扇形三角形：中心 0 与相邻外圈顶点 i+1, i+2
+    for i in 0..SEGMENTS as u32 {
+        mesh.add_triangle(0, i + 1, i + 2);
+    }
+
+    ui.painter().add(egui::Shape::mesh(mesh));
+}
+
+/// 绘制四角颜色插值的矩形（双线性 Gouraud）
+fn draw_gradient_rect(ui: &egui::Ui, rect: Rect, colors: [Color32; 4]) {
+    if !rect.is_positive() {
+        return;
+    }
+    let mut mesh = egui::Mesh::default();
+    mesh.colored_vertex(rect.left_top(), colors[0]);
+    mesh.colored_vertex(rect.right_top(), colors[1]);
+    mesh.colored_vertex(rect.left_bottom(), colors[2]);
+    mesh.colored_vertex(rect.right_bottom(), colors[3]);
+    mesh.add_triangle(0, 1, 2);
+    mesh.add_triangle(2, 1, 3);
+    ui.painter().add(egui::Shape::mesh(mesh));
+}
+
+/// 将贴图图像复制到系统剪贴板
+fn copy_image_to_clipboard(image: &RgbaImage) {
+    let image_data = ImageData {
+        width: image.width() as usize,
+        height: image.height() as usize,
+        bytes: Cow::Owned(image.clone().into_raw()),
+    };
+
+    match Clipboard::new().and_then(|mut clipboard| clipboard.set_image(image_data)) {
+        Ok(_) => tracing::info!("置顶贴图已复制到剪贴板"),
+        Err(e) => tracing::error!("置顶贴图复制到剪贴板失败: {}", e),
+    }
+}
 
 /// 单个置顶贴图的运行时状态
 ///
@@ -104,7 +206,8 @@ impl PinnedImageManager {
                 }
             });
 
-            // 物理像素 → 父视口逻辑像素 → 再乘当前缩放 → 加上阴影扩展空间
+            // 物理像素 → 父视口逻辑像素 → 再乘当前缩放 → 加上右/下方向的阴影扩展空间
+            // 阴影只向右、下扩展，因此仅累加一份 SHADOW_SPREAD
             let logical_size = Vec2::new(
                 item.image.width() as f32 / parent_ppp * item.scale + SHADOW_SPREAD,
                 item.image.height() as f32 / parent_ppp * item.scale + SHADOW_SPREAD,
@@ -153,7 +256,8 @@ impl PinnedImageManager {
                     .show_inside(ui, |ui| {
                         let full_rect = ui.max_rect();
 
-                        // 贴图本体区域：从左上角开始，右下留出阴影扩展空间
+                        // 贴图本体紧贴视口左上角（与截图原位置完全对齐）
+                        // 右、下各预留 SHADOW_SPREAD 像素用于绘制凸起阴影
                         let image_rect = Rect::from_min_max(
                             full_rect.min,
                             Pos2::new(
@@ -162,15 +266,7 @@ impl PinnedImageManager {
                             ),
                         );
 
-                        // 绘制投影阴影层（在贴图本体下方）
-                        for &(offset, alpha) in &SHADOW_LAYERS {
-                            let shadow_rect = image_rect.translate(Vec2::new(offset, offset));
-                            ui.painter().rect_filled(
-                                shadow_rect,
-                                0.0,
-                                Color32::from_black_alpha(alpha),
-                            );
-                        }
+                        draw_shadow(ui, image_rect);
 
                         // 分配响应区
                         let response = ui.allocate_rect(image_rect, Sense::click_and_drag());
@@ -194,6 +290,16 @@ impl PinnedImageManager {
                         // ---- 拖动窗口 ----
                         if response.drag_started_by(egui::PointerButton::Primary) {
                             cctx.send_viewport_cmd_to(viewport_id, ViewportCommand::StartDrag);
+                        }
+
+                        if response.clicked() {
+                            response.request_focus();
+                        }
+
+                        if response.has_focus()
+                            && ui.input(|i| i.modifiers.command && i.key_pressed(egui::Key::C))
+                        {
+                            copy_image_to_clipboard(&image_arc);
                         }
 
                         // 关闭闭包
@@ -260,12 +366,17 @@ impl PinnedImageManager {
                             }
                         }
 
-                        // ---- 右键菜单：另存为 / 关闭 ----
+                        // ---- 右键菜单：复制 / 另存为 / 关闭 ----
                         // image_arc 已是 Arc，进一步 clone 仅是引用计数+1
+                        let image_for_copy = Arc::clone(&image_arc);
                         let image_for_menu = Arc::clone(&image_arc);
                         let vid = viewport_id;
                         let ctx_for_menu = cctx.clone();
                         response.context_menu(move |ui| {
+                            if ui.button("复制").clicked() {
+                                copy_image_to_clipboard(&image_for_copy);
+                                ui.close();
+                            }
                             if ui.button("另存为").clicked() {
                                 let file = rfd::FileDialog::new()
                                     .set_file_name("pinned_image.png")

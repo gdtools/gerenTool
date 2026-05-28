@@ -30,8 +30,6 @@ pub(super) fn handle_capture_process(
         let ctx_clone = ctx.clone();
 
         thread::spawn(move || {
-            // 延迟 150ms 确保窗口已缩小/隐藏，避免截到自身
-            thread::sleep(Duration::from_millis(150));
             tracing::debug!("Capturing screens and windows in background...");
 
             // 捕获所有显示器的屏幕图像
