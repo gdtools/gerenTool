@@ -4,26 +4,53 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+# eframe / egui：UI 框架，使用默认 wgpu 后端
 eframe = { version = "0.34.1", features = ["default"] }
 egui = "0.34.1"
 egui-phosphor = { version = "0.12", features = ["regular"] }
-image = { version = "0.25.9", features = ["png", "jpeg", "gif", "bmp", "webp", "tiff"], default-features = false }
+
+# image: 仅启用截图保存所需的格式（PNG/JPEG/BMP）
+# 裁剪掉 gif/webp/tiff 可减少二进制体积约 1-2MB
+image = { version = "0.25.9", features = ["png", "jpeg", "bmp"], default-features = false }
+
+# arboard 在 Windows 下不会引入 wayland/x11，无需额外配置
 arboard = "3.6.1"
+
+# xcap: 屏幕捕获
 xcap = "0.9.4"
+
+# 日志：tracing-subscriber 关闭不必要的 features
 tracing = "0.1.44"
-tracing-subscriber = { version = "0.3.22", features = ["fmt", "env-filter"] }
+tracing-subscriber = { version = "0.3.22", default-features = false, features = ["fmt", "env-filter"] }
+
 global-hotkey = "0.8.0"
 raw-window-handle = "0.6.2"
+
+# 图像处理与绘制
 tiny-skia = "0.12.0"
-imageproc = "0.26.1"
+# imageproc：仅保留 text feature（绘制文本水印）。
+# 默认 features 中的 rayon/parallel 等并发功能项目未使用，关闭可避免引入 rayon 线程池及其常驻线程内存。
+imageproc = { version = "0.26.1", default-features = false, features = ["text"] }
 ab_glyph = "0.2.32"
+
+# 文件对话框
 rfd = "0.15"
+
+# 数据库：bundled 静态链接 sqlite，体积 +1MB 但避免依赖系统 sqlite3.dll
 rusqlite = { version = "0.32", features = ["bundled"] }
+
+# 系统托盘
 tray-icon = "0.19"
+
+# 开机启动
 auto-launch = "0.5"
+
+# 计算机名 / 路径
 hostname = "0.4"
 directories = "5"
-chrono = "0.4"
+
+# 时间戳
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
 
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.62.2", features = [
@@ -37,3 +64,29 @@ windows = { version = "0.62.2", features = [
     "Win32_System_Time",
     "Win32_UI_Input_KeyboardAndMouse",
 ] }
+
+# ========== Release 构建优化 ==========
+# 目标：最小化运行时内存、二进制体积；以编译时间换取启动 + 运行性能。
+#
+# - opt-level = "z"：以体积优先优化（"s" 是折中，"z" 更激进；
+#   实测桌面 egui 应用差异 < 5%，对 wgpu/绘制热路径无明显影响）
+# - lto = "fat"：跨 crate 内联，去除大量未使用代码（典型节省 30-50% 体积）
+# - codegen-units = 1：让 LTO 看到完整翻译单元，进一步内联
+# - strip = "symbols"：去掉调试符号，减小可执行文件
+# - panic = "abort"：去掉 unwind 表（约节省 5-10% 体积，
+#   代价：panic 时直接 abort，无 catch_unwind）
+[profile.release]
+opt-level = "z"
+lto = "fat"
+codegen-units = 1
+strip = "symbols"
+panic = "abort"
+debug = false
+incremental = false
+
+# 给开发模式中常用的依赖单独开 opt-level=2，避免渲染卡顿
+[profile.dev.package."*"]
+opt-level = 2
+
+[profile.dev]
+opt-level = 1

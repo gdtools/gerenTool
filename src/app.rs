@@ -77,7 +77,7 @@ impl SettingsApp {
         let (_window_state, common_state) = create_screenshot_state(hwnd_usize);
 
         // 创建托盘（失败时仅记录错误，程序继续运行）
-        let tray = match TrayController::new() {
+        let tray = match TrayController::new(&cc.egui_ctx) {
             Ok(t) => Some(t),
             Err(e) => {
                 tracing::error!("创建系统托盘失败: {:?}", e);
@@ -130,7 +130,7 @@ impl SettingsApp {
                     if self.mode != AppMode::Screenshot {
                         if let Some(new_mode) =
                             self.screenshot_feature.handle_hotkey(HotkeyAction::SetScreenshotMode {
-                                prev_state: WindowPrevState::Normal,
+                                prev_state: WindowPrevState::Tray,
                             })
                         {
                             self.mode = new_mode;
@@ -162,29 +162,49 @@ impl SettingsApp {
 }
 
 /// 配置中文字体和图标字体（使用系统字体 + phosphor 图标字体）
+///
+/// 内存优化要点：
+/// 1. 不再使用 `Box::leak` 把整份 msyh.ttc 永久驻留在堆上(~20MB)。
+///    改用 `FontData::from_owned(Vec<u8>)`：所有权转移给 egui 内部，
+///    egui 自己用 `Arc<Vec<u8>>` 管理，最终在 ctx 释放时被回收。
+/// 2. 优先使用 `msyh.ttc`(微软雅黑标准字重)。
+///    若失败则尝试 `msyhl.ttc`(Light) 或 `simsun.ttc`(宋体)。
+///    选用最小的可用 CJK 字体可显著降低运行时驻留内存。
 fn setup_fonts(ctx: &egui::Context) {
     let mut fonts = FontDefinitions::default();
 
-    // 尝试从系统路径加载微软雅黑
-    let font_path = "C:\\Windows\\Fonts\\msyh.ttc";
-    if let Ok(font_data) = std::fs::read(font_path) {
-        let font_data: &'static [u8] = Box::leak(font_data.into_boxed_slice());
-        fonts.font_data.insert(
-            "msyh".to_owned(),
-            Arc::new(FontData::from_static(font_data)),
-        );
+    // 候选字体列表，按"体积优先 + 视觉妥协"顺序排列
+    // - msyhl.ttc: 微软雅黑 Light，体积更小（约 14MB）
+    // - msyh.ttc:  微软雅黑 Regular（约 20MB）
+    // - simsun.ttc: 宋体备用
+    const FONT_CANDIDATES: &[&str] = &[
+        "C:\\Windows\\Fonts\\msyhl.ttc",
+        "C:\\Windows\\Fonts\\msyh.ttc",
+        "C:\\Windows\\Fonts\\simsun.ttc",
+    ];
 
-        fonts
-            .families
-            .entry(FontFamily::Proportional)
-            .or_default()
-            .insert(0, "msyh".to_owned());
+    for path in FONT_CANDIDATES {
+        if let Ok(font_data) = std::fs::read(path) {
+            // 关键：from_owned 让 egui 拿走所有权(Arc 管理)，
+            // 而不是 Box::leak 永久泄漏 'static 引用
+            fonts.font_data.insert(
+                "cjk".to_owned(),
+                Arc::new(FontData::from_owned(font_data)),
+            );
 
-        fonts
-            .families
-            .entry(FontFamily::Monospace)
-            .or_default()
-            .push("msyh".to_owned());
+            fonts
+                .families
+                .entry(FontFamily::Proportional)
+                .or_default()
+                .insert(0, "cjk".to_owned());
+
+            fonts
+                .families
+                .entry(FontFamily::Monospace)
+                .or_default()
+                .push("cjk".to_owned());
+            break;
+        }
     }
 
     // 注册 phosphor 图标字体
@@ -235,6 +255,14 @@ impl eframe::App for SettingsApp {
                         *v = false;
                     }
                 }
+
+                // 内存优化：窗口隐藏到托盘时，触发 egui CacheStorage 的 LRU 清扫，
+                // 释放本帧未被访问的字形/Galley/形状缓存。
+                // egui 0.34 的 update() 会遍历所有 cache 并调用其 update()，
+                // 内部实现是"丢弃上一帧未命中的条目"。
+                ctx.memory_mut(|mem| {
+                    mem.caches.update();
+                });
             } else if let Some(common) = &self.screenshot_common {
                 // 用户主动退出：放行
                 if let Ok(mut allow) = common.window_state.allow_quit.lock() {

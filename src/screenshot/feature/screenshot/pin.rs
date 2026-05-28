@@ -1,9 +1,10 @@
 use eframe::egui::{
-    self, Color32, Context, Frame, Id, Pos2, Rect, Sense, Stroke, StrokeKind, Vec2,
+    self, Color32, Context, Frame, Id, Pos2, Rect, Sense, Stroke, StrokeKind, TextureHandle, Vec2,
     ViewportBuilder, ViewportClass, ViewportCommand, ViewportId, WindowLevel,
 };
 use image::RgbaImage;
 use std::collections::HashMap;
+use std::sync::Arc;
 
 /// 投影阴影层定义：(偏移像素, alpha 值)
 /// 从近到远排列，越远偏移越大、透明度越高（alpha 越低）
@@ -19,12 +20,18 @@ const SHADOW_LAYERS: [(f32, u8); 5] = [
 const SHADOW_SPREAD: f32 = SHADOW_LAYERS[SHADOW_LAYERS.len() - 1].0;
 
 /// 单个置顶贴图的运行时状态
-#[derive(Clone)]
+///
+/// 内存优化关键：
+/// - `image` 使用 `Arc<RgbaImage>`，避免每帧 clone 整张图像(4K 图 ≈ 30MB)
+/// - `texture` 只在首帧上传一次到 GPU，后续帧直接复用 TextureHandle，
+///   避免每帧重新 `ColorImage::from_rgba_unmultiplied + load_texture`
 pub struct PinnedImage {
     /// 贴图纹理名称
     pub texture_name: String,
-    /// 原始 RGBA 图像
-    pub image: RgbaImage,
+    /// 原始 RGBA 图像（Arc 共享，避免按值 clone）
+    pub image: Arc<RgbaImage>,
+    /// 已上传的 GPU 纹理（首帧创建后复用）
+    pub texture: Option<TextureHandle>,
     /// 贴图屏幕位置（逻辑坐标）
     pub pos: Pos2,
     /// 当前缩放比例
@@ -58,7 +65,8 @@ impl PinnedImageManager {
             viewport_id,
             PinnedImage {
                 texture_name,
-                image,
+                image: Arc::new(image),
+                texture: None,
                 pos,
                 scale: 1.0,
                 should_close: false,
@@ -71,12 +79,12 @@ impl PinnedImageManager {
     /// 渲染所有置顶贴图子视口
     ///
     /// 关键点：
-    /// 1. 子视口尺寸必须用"逻辑像素"（egui 的 with_inner_size 使用逻辑像素），
-    ///    而 `item.image` 是物理像素，需要除以父视口 ppp 再乘 scale。
-    /// 2. 回调内必须使用 CentralPanel 铺满窗口，否则 ui.max_rect 不一定
-    ///    覆盖整个客户区，导致 allocate_rect 出的 response 收不到点击/拖拽/滚轮。
-    /// 3. 拖动窗口通过 ViewportCommand::StartDrag 交给系统处理，要求左键
-    ///    刚按下时立即调用一次。
+    /// 1. 子视口尺寸必须用"逻辑像素"。
+    /// 2. 回调内必须使用 CentralPanel 铺满窗口。
+    /// 3. 拖动窗口通过 ViewportCommand::StartDrag。
+    /// 4. 纹理在首帧 lazy 上传一次后缓存到 `PinnedImage.texture`，
+    ///    后续帧直接复用句柄；图像数据用 `Arc` 在主线程和回调闭包之间共享，
+    ///    避免每次进入此函数都 clone 整张大图。
     pub fn show_viewports(&mut self, ctx: &Context) {
         // 父视口的像素缩放，用于把图像物理像素换算成子视口的逻辑像素
         let parent_ppp = ctx.pixels_per_point().max(1.0);
@@ -102,6 +110,18 @@ impl PinnedImageManager {
                 item.image.height() as f32 / parent_ppp * item.scale + SHADOW_SPREAD,
             );
 
+            // ---- 首帧上传纹理：只创建一次，后续帧直接复用 ----
+            // 早期实现是每帧 ColorImage::from_rgba_unmultiplied + load_texture，
+            // 会在 CPU 端反复分配/复制几十 MB 的像素数据；此处改为 lazy 一次性
+            if item.texture.is_none() {
+                let color_image = egui::ColorImage::from_rgba_unmultiplied(
+                    [item.image.width() as usize, item.image.height() as usize],
+                    item.image.as_raw(),
+                );
+                item.texture =
+                    Some(ctx.load_texture(&item.texture_name, color_image, Default::default()));
+            }
+
             let builder = ViewportBuilder::default()
                 .with_title("Pinned Image")
                 .with_decorations(false)
@@ -110,31 +130,27 @@ impl PinnedImageManager {
                 .with_inner_size(logical_size)
                 .with_position(item.pos)
                 .with_window_level(WindowLevel::AlwaysOnTop)
-                // 从任务栏隐藏贴图窗口，避免每张贴图都出现独立的任务栏图标
+                // 从任务栏隐藏贴图窗口
                 .with_taskbar(false);
 
-            let texture_name = item.texture_name.clone();
-            let image = item.image.clone();
+            // 共享数据进入闭包：
+            // - image_arc: Arc 引用，按引用计数共享 RgbaImage(右键另存为用)
+            // - texture:   TextureHandle 内部也是 Arc，clone 仅是引用计数+1
+            // - 这里不会再 clone 像素数据
+            let image_arc: Arc<RgbaImage> = Arc::clone(&item.image);
+            let texture = item.texture.clone().expect("texture initialized above");
+            let img_w = item.image.width();
+            let img_h = item.image.height();
 
             ctx.show_viewport_deferred(viewport_id, builder, move |ui, class| {
                 if class != ViewportClass::Deferred && class != ViewportClass::EmbeddedWindow {
                     return;
                 }
 
-                // 用 CentralPanel::show_inside 铺满整个子视口客户区，确保后续
-                // allocate 的响应区域真正覆盖窗口，并能接收点击/拖拽/滚轮/右键事件
                 let cctx = ui.ctx().clone();
                 egui::CentralPanel::default()
                     .frame(Frame::NONE.fill(Color32::TRANSPARENT))
                     .show_inside(ui, |ui| {
-                        // 加载贴图纹理（每帧创建开销可接受，纹理由 ctx 内部缓存）
-                        let color_image = egui::ColorImage::from_rgba_unmultiplied(
-                            [image.width() as usize, image.height() as usize],
-                            image.as_raw(),
-                        );
-                        let texture =
-                            cctx.load_texture(&texture_name, color_image, Default::default());
-
                         let full_rect = ui.max_rect();
 
                         // 贴图本体区域：从左上角开始，右下留出阴影扩展空间
@@ -147,7 +163,6 @@ impl PinnedImageManager {
                         );
 
                         // 绘制投影阴影层（在贴图本体下方）
-                        // 每层向右下偏移，alpha 逐渐降低，模拟自然光照投影
                         for &(offset, alpha) in &SHADOW_LAYERS {
                             let shadow_rect = image_rect.translate(Vec2::new(offset, offset));
                             ui.painter().rect_filled(
@@ -157,11 +172,10 @@ impl PinnedImageManager {
                             );
                         }
 
-                        // 分配一个覆盖贴图本体的响应区，开启 click_and_drag 以同时支持
-                        // 点击关闭、拖动窗口、右键菜单（阴影区域不响应交互）
+                        // 分配响应区
                         let response = ui.allocate_rect(image_rect, Sense::click_and_drag());
 
-                        // 绘制贴图本体
+                        // 绘制贴图本体（复用预先创建的纹理）
                         ui.painter().image(
                             texture.id(),
                             image_rect,
@@ -169,7 +183,7 @@ impl PinnedImageManager {
                             Color32::WHITE,
                         );
 
-                        // 绘制 1 像素细描边便于辨识贴图边界
+                        // 描边
                         ui.painter().rect_stroke(
                             image_rect,
                             0.0,
@@ -177,15 +191,12 @@ impl PinnedImageManager {
                             StrokeKind::Inside,
                         );
 
-                        // ---- 拖动窗口：左键按下立即触发 StartDrag ----
-                        // 注意：StartDrag 必须在"刚按下"那一帧调用才会被 winit 接受，
-                        // 因此使用 drag_started() 而不是 dragged()。
+                        // ---- 拖动窗口 ----
                         if response.drag_started_by(egui::PointerButton::Primary) {
                             cctx.send_viewport_cmd_to(viewport_id, ViewportCommand::StartDrag);
                         }
 
-                        // 关闭辅助闭包：先隐藏窗口再 Close，避免 OS 关闭动画里
-                        // 闪一下"上一帧旧尺寸"的图像
+                        // 关闭闭包
                         let request_close = || {
                             cctx.send_viewport_cmd_to(viewport_id, ViewportCommand::Visible(false));
                             cctx.send_viewport_cmd_to(viewport_id, ViewportCommand::Close);
@@ -196,22 +207,21 @@ impl PinnedImageManager {
                             request_close();
                         }
 
-                        // ---- Esc 键关闭（仅当鼠标悬停在贴图上或贴图获得焦点时生效）----
-                        // 子视口默认收不到全局键盘事件，但若窗口在前台并获得焦点，
-                        // egui 会把按键事件路由进来。这里只要本视口收到 Escape 就关闭。
+                        // ---- Esc 键关闭 ----
                         if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
                             request_close();
                         }
 
-                        // ---- 鼠标滚轮缩放（实时）----
-                        // 直接从当前 ui 获取输入（CentralPanel 内部）
-                        // 包含平滑滚动，以及触控板/Ctrl+滚轮的缩放比例
+                        // ---- 鼠标滚轮缩放 ----
                         let scroll_y = ui.input(|i| {
-                            // egui 0.34 中没有 raw_scroll_delta，可以通过 events 手动获取或直接用 smooth_scroll_delta
-                            let events_y: f32 = i.events.iter().map(|e| match e {
-                                egui::Event::MouseWheel { delta, .. } => delta.y,
-                                _ => 0.0,
-                            }).sum();
+                            let events_y: f32 = i
+                                .events
+                                .iter()
+                                .map(|e| match e {
+                                    egui::Event::MouseWheel { delta, .. } => delta.y,
+                                    _ => 0.0,
+                                })
+                                .sum();
                             if events_y.abs() > 0.0 {
                                 events_y
                             } else {
@@ -233,21 +243,26 @@ impl PinnedImageManager {
                             }
 
                             if zoom_delta != 0.0 {
-                                let current = cctx.data(|d| d.get_temp::<f32>(zoom_key).unwrap_or(1.0));
+                                let current =
+                                    cctx.data(|d| d.get_temp::<f32>(zoom_key).unwrap_or(1.0));
                                 let new_scale = (current + zoom_delta).clamp(0.2, 5.0);
                                 cctx.data_mut(|d| d.insert_temp(zoom_key, new_scale));
-                                
+
                                 let new_logical_size = Vec2::new(
-                                    image.width() as f32 / parent_ppp * new_scale + SHADOW_SPREAD,
-                                    image.height() as f32 / parent_ppp * new_scale + SHADOW_SPREAD,
+                                    img_w as f32 / parent_ppp * new_scale + SHADOW_SPREAD,
+                                    img_h as f32 / parent_ppp * new_scale + SHADOW_SPREAD,
                                 );
-                                cctx.send_viewport_cmd_to(viewport_id, ViewportCommand::InnerSize(new_logical_size));
+                                cctx.send_viewport_cmd_to(
+                                    viewport_id,
+                                    ViewportCommand::InnerSize(new_logical_size),
+                                );
                                 cctx.request_repaint();
                             }
                         }
 
                         // ---- 右键菜单：另存为 / 关闭 ----
-                        let image_for_menu = image.clone();
+                        // image_arc 已是 Arc，进一步 clone 仅是引用计数+1
+                        let image_for_menu = Arc::clone(&image_arc);
                         let vid = viewport_id;
                         let ctx_for_menu = cctx.clone();
                         response.context_menu(move |ui| {
@@ -262,7 +277,6 @@ impl PinnedImageManager {
                                 ui.close();
                             }
                             if ui.button("关闭").clicked() {
-                                // 与上面 request_close 行为一致：先隐藏再 Close
                                 ctx_for_menu
                                     .send_viewport_cmd_to(vid, ViewportCommand::Visible(false));
                                 ctx_for_menu.send_viewport_cmd_to(vid, ViewportCommand::Close);
@@ -270,7 +284,7 @@ impl PinnedImageManager {
                             }
                         });
 
-                        // ---- 处理窗口自身的关闭请求（来自系统/Alt+F4 等） ----
+                        // ---- 系统关闭请求 ----
                         if cctx.input(|i| i.viewport().close_requested()) {
                             request_close();
                         }
@@ -283,12 +297,11 @@ impl PinnedImageManager {
 
     /// 清理已关闭的贴图视口
     ///
-    /// 使用 `input_for_viewport` 检查每个子视口自身的关闭请求，
-    /// 而非主视口的关闭状态（原实现会误判）
+    /// 关闭一个贴图意味着：丢弃 PinnedImage（其 image Arc 与 texture 都会被 drop，
+    /// 进而触发 ctx.tex_manager 卸载 GPU 纹理），显著降低长期持有的内存占用。
     fn gc_closed(&mut self, ctx: &Context) {
         self.items.retain(|viewport_id, item| {
-            let close_requested =
-                ctx.input_for(*viewport_id, |i| i.viewport().close_requested());
+            let close_requested = ctx.input_for(*viewport_id, |i| i.viewport().close_requested());
             !close_requested && !item.should_close
         });
     }
