@@ -8,6 +8,7 @@ edition = "2024"
 eframe = { version = "0.34.1", features = ["default"] }
 egui = "0.34.1"
 egui-phosphor = { version = "0.12", features = ["regular"] }
+egui-toast = "0.20.0"
 
 # image: 仅启用截图保存所需的格式（PNG/JPEG/BMP）
 # 裁剪掉 gif/webp/tiff 可减少二进制体积约 1-2MB

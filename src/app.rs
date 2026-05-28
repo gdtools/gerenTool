@@ -5,15 +5,16 @@ use crate::pages::{
     SettingsPage, StoragePage,
 };
 use crate::screenshot::feature::screenshot::state::WindowPrevState;
-use crate::screenshot::feature::screenshot::AppMode;
-use crate::screenshot::feature::screenshot::ScreenshotFeature;
+use crate::screenshot::feature::screenshot::{AppMode, ScreenshotFeature, ToastKind, ToastMessage};
 use crate::screenshot::hotkey::HotkeyAction;
 use crate::screenshot::model::state::CommonState;
 use crate::screenshot::{create_screenshot_state, ScreenshotManager};
 use crate::tray::{TrayAction, TrayController};
 use eframe::egui::{self, FontData, FontDefinitions, FontFamily};
+use egui_toast::{Toast, ToastOptions, Toasts};
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use std::collections::HashMap;
+use std::sync::mpsc::Receiver;
 use std::sync::Arc;
 
 /// 设置应用主结构体
@@ -40,6 +41,8 @@ pub struct SettingsApp {
     user_quit_requested: bool,
     /// 当前已应用的主题（用于避免每帧重复设置）
     current_dark_mode: bool,
+    /// Toast 消息接收通道（来自截图功能模块）
+    toast_rx: Receiver<ToastMessage>,
 }
 
 impl SettingsApp {
@@ -90,18 +93,21 @@ impl SettingsApp {
             }
         };
 
+        let (screenshot_feature, toast_rx) = ScreenshotFeature::new();
+
         Self {
             current_menu_id,
             menus,
             pages,
             mode: AppMode::Idle,
             screenshot_manager: None,
-            screenshot_feature: ScreenshotFeature::new(),
+            screenshot_feature,
             screenshot_common: Some(common_state),
             tray,
             initialized: false,
             user_quit_requested: false,
             current_dark_mode: dark,
+            toast_rx,
         }
     }
 
@@ -331,6 +337,31 @@ impl eframe::App for SettingsApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         // 置顶贴图必须在每帧无条件渲染
         self.screenshot_feature.show_pinned_viewports(ui.ctx());
+
+        // 全局 Toast：从通道 drain 所有待显示消息，统一在右下角展示
+        let mut toasts = Toasts::new()
+            .anchor(egui::Align2::RIGHT_BOTTOM, (-16.0, -16.0))
+            .direction(egui::Direction::BottomUp)
+            .order(egui::Order::Tooltip);
+
+        while let Ok(msg) = self.toast_rx.try_recv() {
+            let kind = match msg.kind {
+                ToastKind::Success => egui_toast::ToastKind::Success,
+                ToastKind::Error => egui_toast::ToastKind::Error,
+                ToastKind::Info => egui_toast::ToastKind::Info,
+            };
+            toasts.add(Toast {
+                text: msg.text.into(),
+                kind,
+                options: ToastOptions::default()
+                    .duration_in_seconds(3.0)
+                    .show_progress(true)
+                    .show_icon(true),
+                ..Default::default()
+            });
+        }
+
+        toasts.show(ui);
 
         if self.mode == AppMode::Screenshot {
             if let Some(ref mut common) = self.screenshot_common {

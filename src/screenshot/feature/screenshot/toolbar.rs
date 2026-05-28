@@ -8,7 +8,8 @@ use egui::UiBuilder;
 ///
 /// 计算依据：
 /// 6个工具按钮(192) + 4间距(32) + 分割区(17) + 5个动作按钮(160) + 4间距(32) + 两侧padding(16) = 449
-const TOOLBAR_WIDTH: f32 = 465.0;
+/// 新增：分割区(17) + 2个功能按钮(64) + 1间距(8) = 89
+const TOOLBAR_WIDTH: f32 = 554.0;
 /// 工具栏总高度（仅按钮行）
 const TOOLBAR_HEIGHT: f32 = 48.0;
 /// 工具栏与屏幕边缘的间距
@@ -163,7 +164,7 @@ fn draw_screenshot_toolbar(
     action
 }
 
-/// 绘制按钮行（左侧工具 + 分割线 + 右侧动作）
+/// 绘制按钮行（左侧工具 + 分割线 + 中间功能 + 分割线 + 右侧动作）
 fn draw_button_row(ui: &mut Ui, state: &mut ScreenshotState) -> ScreenshotAction {
     let mut action = ScreenshotAction::None;
 
@@ -204,7 +205,7 @@ fn draw_button_row(ui: &mut Ui, state: &mut ScreenshotState) -> ScreenshotAction
     ];
     for (tool, icon, tooltip) in tool_buttons {
         let is_selected = state.drawing.current_tool == Some(tool);
-        let resp = draw_tool_button(ui, is_selected, icon, TOOLBAR_BUTTON_SIZE)
+        let resp = draw_tool_button(ui, is_selected, icon, TOOLBAR_BUTTON_SIZE, None)
             .on_hover_text(tooltip);
         if resp.clicked() {
             state.drawing.current_tool = Some(tool);
@@ -212,7 +213,7 @@ fn draw_button_row(ui: &mut Ui, state: &mut ScreenshotState) -> ScreenshotAction
     }
 
     // =========================
-    // 【中间】视觉分割线
+    // 【第一条分割线】
     // =========================
     ui.add_space(TOOLBAR_ITEM_SPACING);
 
@@ -228,9 +229,83 @@ fn draw_button_row(ui: &mut Ui, state: &mut ScreenshotState) -> ScreenshotAction
     ui.add_space(TOOLBAR_ITEM_SPACING);
 
     // =========================
+    // 【中间】功能按钮：滚动截图 + 延时截图
+    // =========================
+
+    // 滚动截图按钮
+    let is_scrolling = matches!(state.runtime.scroll_capture, crate::screenshot::feature::screenshot::state::ScrollCapturePhase::Running { .. });
+    let scroll_icon = if is_scrolling {
+        egui_phosphor::regular::STOP
+    } else {
+        egui_phosphor::regular::ARROWS_DOWN_UP
+    };
+    let scroll_color = if is_scrolling {
+        Some(Color32::from_rgb(255, 59, 48)) // 红色停止按钮
+    } else {
+        None
+    };
+    let scroll_hover = if is_scrolling {
+        "停止滚动并合并保存"
+    } else {
+        "滚动截图"
+    };
+
+    if draw_tool_button(
+        ui,
+        false,
+        scroll_icon,
+        TOOLBAR_BUTTON_SIZE,
+        scroll_color,
+    )
+    .on_hover_text(scroll_hover)
+    .clicked()
+    {
+        if is_scrolling {
+            action = ScreenshotAction::StopScrollCapture;
+        } else {
+            action = ScreenshotAction::ScrollCapture;
+        }
+    }
+
+    // 延时截图按钮（点击后弹出时间选择浮层）
+    let delay_btn_resp = draw_tool_button(
+        ui,
+        false,
+        egui_phosphor::regular::TIMER,
+        TOOLBAR_BUTTON_SIZE,
+        None,
+    )
+    .on_hover_text("延时截图");
+
+    // 使用 egui Popup::menu 显示延时时间选择浮层（点击按钮切换显示/隐藏）
+    let delay_popup_id = egui::Popup::default_response_id(&delay_btn_resp);
+    egui::Popup::menu(&delay_btn_resp)
+        .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+        .show(|popup_ui| {
+            popup_ui.set_min_width(100.0);
+            draw_delay_popup(popup_ui, &mut action, delay_popup_id);
+        });
+
+    ui.add_space(TOOLBAR_ITEM_SPACING);
+
+    // =========================
+    // 【第二条分割线】
+    // =========================
+    let (sep_rect2, _) = ui.allocate_exact_size(
+        Vec2::new(TOOLBAR_DIVIDER_WIDTH, TOOLBAR_DIVIDER_HEIGHT),
+        egui::Sense::hover(),
+    );
+    ui.painter().line_segment(
+        [sep_rect2.center_top(), sep_rect2.center_bottom()],
+        Stroke::new(1.0, Color32::from_gray(220)),
+    );
+
+    ui.add_space(TOOLBAR_ITEM_SPACING);
+
+    // =========================
     // 【右侧】行为动作按钮
     // =========================
-    if draw_tool_button(ui, false, egui_phosphor::regular::X, TOOLBAR_BUTTON_SIZE)
+    if draw_tool_button(ui, false, egui_phosphor::regular::X, TOOLBAR_BUTTON_SIZE, None)
         .on_hover_text("关闭")
         .clicked()
     {
@@ -242,6 +317,7 @@ fn draw_button_row(ui: &mut Ui, state: &mut ScreenshotState) -> ScreenshotAction
         false,
         egui_phosphor::regular::CLIPBOARD_TEXT,
         TOOLBAR_BUTTON_SIZE,
+        None,
     )
     .on_hover_text("复制")
     .clicked()
@@ -254,6 +330,7 @@ fn draw_button_row(ui: &mut Ui, state: &mut ScreenshotState) -> ScreenshotAction
         false,
         egui_phosphor::regular::DOWNLOAD_SIMPLE,
         TOOLBAR_BUTTON_SIZE,
+        None,
     )
     .on_hover_text("另存为")
     .clicked()
@@ -266,6 +343,7 @@ fn draw_button_row(ui: &mut Ui, state: &mut ScreenshotState) -> ScreenshotAction
         false,
         egui_phosphor::regular::FLOPPY_DISK,
         TOOLBAR_BUTTON_SIZE,
+        None,
     )
     .on_hover_text("保存")
     .clicked()
@@ -278,6 +356,7 @@ fn draw_button_row(ui: &mut Ui, state: &mut ScreenshotState) -> ScreenshotAction
         false,
         egui_phosphor::regular::PUSH_PIN,
         TOOLBAR_BUTTON_SIZE,
+        None,
     )
     .on_hover_text("置顶")
     .clicked()
@@ -286,6 +365,38 @@ fn draw_button_row(ui: &mut Ui, state: &mut ScreenshotState) -> ScreenshotAction
     }
 
     action
+}
+
+/// 绘制延时截图时间选择浮层内容
+///
+/// 提供 2 秒、5 秒、10 秒三个选项，点击后触发对应的 DelayCapture 动作
+fn draw_delay_popup(ui: &mut Ui, action: &mut ScreenshotAction, popup_id: egui::Id) {
+    /// 延时选项：(显示文字, 秒数)
+    const DELAY_OPTIONS: [(&str, u32); 3] = [
+        ("2 秒后截图", 2),
+        ("5 秒后截图", 5),
+        ("10 秒后截图", 10),
+    ];
+
+    ui.vertical(|ui| {
+        ui.add_space(4.0);
+        for (label, secs) in DELAY_OPTIONS {
+            let resp = ui.add(
+                egui::Button::new(
+                    egui::RichText::new(label)
+                        .size(13.0)
+                        .color(ui.visuals().text_color()),
+                )
+                .frame(false)
+                .min_size(Vec2::new(96.0, 28.0)),
+            );
+            if resp.clicked() {
+                *action = ScreenshotAction::DelayCapture(secs);
+                ui.memory_mut(|mem| mem.close_popup(popup_id));
+            }
+        }
+        ui.add_space(4.0);
+    });
 }
 
 /// 绘制属性面板（工具选中时显示在按钮行下方）
@@ -434,6 +545,7 @@ fn draw_tool_button(
     is_selected: bool,
     icon: &str,
     size: f32,
+    custom_color: Option<Color32>,
 ) -> egui::Response {
     let (rect, response) = ui.allocate_exact_size(Vec2::splat(size), egui::Sense::click());
 
@@ -449,8 +561,10 @@ fn draw_tool_button(
             Color32::TRANSPARENT
         };
 
-        // 图标颜色：选中蓝色 > 正常文字色
-        let icon_color = if is_selected {
+        // 图标颜色：自定义 > 选中蓝色 > 正常文字色
+        let icon_color = if let Some(color) = custom_color {
+            color
+        } else if is_selected {
             Color32::from_rgb(66, 133, 244)
         } else {
             visuals.text_color()

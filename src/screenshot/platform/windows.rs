@@ -196,6 +196,20 @@ impl WindowManager for WindowsPlatform {
             }
         }
     }
+
+    fn set_cursor_pos(&self, x: i32, y: i32) {
+        unsafe {
+            let _ = windows::Win32::UI::WindowsAndMessaging::SetCursorPos(x, y);
+        }
+    }
+
+    fn get_cursor_pos(&self) -> (i32, i32) {
+        unsafe {
+            let mut pt = windows::Win32::Foundation::POINT { x: 0, y: 0 };
+            let _ = windows::Win32::UI::WindowsAndMessaging::GetCursorPos(&mut pt);
+            (pt.x, pt.y)
+        }
+    }
 }
 
 impl ScreenshotPlatform for WindowsPlatform {

@@ -99,11 +99,19 @@ fn configure_screenshot_viewport(
         max_y = max_y.max(phys_y + phys_h);
     }
 
-    let total_phys_width = (max_x - min_x + 100.0).max(1.0);
-    let total_phys_height = (max_y - min_y + 100.0).max(1.0);
-    let exact_logical_pos = Pos2::new(min_x / ppp, min_y / ppp);
-    let requested_phys_size = Vec2::new(total_phys_width, total_phys_height);
-    let exact_logical_size = clamp_viewport_extent(requested_phys_size, ppp);
+    let _global_offset_phys = Pos2::new(min_x, min_y);
+
+    let (exact_logical_pos, exact_logical_size) = {
+        let total_phys_width = (max_x - min_x + 100.0).max(1.0);
+        let total_phys_height = (max_y - min_y + 100.0).max(1.0);
+        let requested_phys_size = Vec2::new(total_phys_width, total_phys_height);
+        (
+            Pos2::new(min_x / ppp, min_y / ppp),
+            clamp_viewport_extent(requested_phys_size, ppp),
+        )
+    };
+
+    let requested_phys_size = exact_logical_size * ppp;
 
     // 计算当前窗口的实际物理尺寸
     let viewport = ctx.input(|i| i.viewport().clone());
@@ -137,7 +145,7 @@ fn configure_screenshot_viewport(
         );
     }
 
-    // 配置窗口为全屏透明覆盖层
+    // 配置窗口为全屏/局部透明覆盖层
     ctx.send_viewport_cmd(ViewportCommand::Decorations(false));
     ctx.send_viewport_cmd(ViewportCommand::Transparent(true));
     ctx.send_viewport_cmd(ViewportCommand::Visible(true));
@@ -297,7 +305,6 @@ pub fn draw_screenshot_ui_inside(
     for cap in &state.capture.captures {
         if let Some(texture) = state.capture.texture_pool.get(&cap.screen_info.name) {
             let rect = device_info.screen_logical_rect(&cap.screen_info, ppp);
-
             painter.image(
                 texture.id(),
                 rect,

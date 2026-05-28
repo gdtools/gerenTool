@@ -50,6 +50,30 @@ pub enum ScreenshotAction {
     SaveToClipboard,
     /// 置顶贴图（将选区内容钉到屏幕最顶层）
     PinToTop,
+    /// 延时截图（关闭覆盖层，等待指定秒数后重新截图）
+    DelayCapture(u32),
+    /// 开始滚动截图（覆盖层保持，进入滚动捕获模式）
+    ScrollCapture,
+    /// 停止滚动截图（合并帧，保存到桌面，关闭覆盖层）
+    StopScrollCapture,
+}
+
+/// 滚动截图阶段
+#[derive(Default, Clone)]
+pub enum ScrollCapturePhase {
+    /// 未启动
+    #[default]
+    Idle,
+    /// 正在滚动捕获中
+    /// frames: 已捕获的帧列表（每帧为裁剪后的选区图像）
+    /// selection: 选区物理坐标
+    Running {
+        long_image: image::RgbaImage,
+        prev_frame: image::RgbaImage,
+        selection: eframe::egui::Rect,
+        /// 上次截帧的时间
+        last_capture: std::time::Instant,
+    },
 }
 
 /// 截图绘图工具类型
@@ -232,6 +256,8 @@ pub struct ScreenshotRuntimeState {
     pub window_configured: bool,
     /// 截图前的窗口是否已被同步移动到屏幕外
     pub window_hidden_for_capture: bool,
+    /// 滚动截图阶段状态
+    pub scroll_capture: ScrollCapturePhase,
 }
 
 impl ScreenshotRuntimeState {
@@ -239,6 +265,7 @@ impl ScreenshotRuntimeState {
         Self {
             window_configured: false,
             window_hidden_for_capture: false,
+            scroll_capture: ScrollCapturePhase::Idle,
         }
     }
 }

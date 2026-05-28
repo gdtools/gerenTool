@@ -21,6 +21,12 @@ pub trait WindowManager {
 
     /// 强制获取窗口焦点（处理跨线程焦点切换）
     fn force_get_focus(&self, hwnd_usize: usize);
+
+    /// 移动光标到指定位置（物理像素）
+    fn set_cursor_pos(&self, x: i32, y: i32);
+
+    /// 获取当前光标位置（物理像素）
+    fn get_cursor_pos(&self) -> (i32, i32);
 }
 
 /// 截图平台接口

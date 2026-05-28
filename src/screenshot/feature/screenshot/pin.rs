@@ -9,7 +9,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 /// 阴影向右下扩展的像素数（仅向右、向下，不向上/左扩，避免贴图与截图原位置错位）
-const SHADOW_SPREAD: f32 = 8.0;
+const SHADOW_SPREAD: f32 = 4.0;
 
 /// 阴影渐变内侧颜色（紧贴贴图）：接近纯黑
 const SHADOW_INNER: Color32 = Color32::from_rgb(10, 10, 10);
@@ -69,7 +69,7 @@ fn draw_radial_corner(ui: &egui::Ui, center: Pos2, radius: f32, inner: Color32, 
     }
 
     // 扇形细分段数：越大越接近真正径向渐变，8 段已足够平滑
-    const SEGMENTS: usize = 8;
+    const SEGMENTS: usize = 4;
 
     let mut mesh = egui::Mesh::default();
     mesh.colored_vertex(center, inner);
