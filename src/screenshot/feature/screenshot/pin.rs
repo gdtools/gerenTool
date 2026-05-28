@@ -14,7 +14,7 @@ const SHADOW_SPREAD: f32 = 8.0;
 /// 阴影渐变内侧颜色（紧贴贴图）：接近纯黑
 const SHADOW_INNER: Color32 = Color32::from_rgb(10, 10, 10);
 /// 阴影渐变外侧颜色（远离贴图）：接近纯白
-const SHADOW_OUTER: Color32 = Color32::from_rgb(250, 250, 250);
+const SHADOW_OUTER: Color32 = Color32::from_rgb(100, 200, 250);
 
 /// 绘制贴图右、下方向的凸起阴影
 ///
