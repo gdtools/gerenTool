@@ -141,10 +141,29 @@ impl SettingsApp {
                     }
                 }
                 TrayAction::ShowSettings => {
-                    // 让窗口重新显示并获得焦点
-                    ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+                    let window_size = egui::vec2(800.0, 600.0);
+                    let min_size = egui::vec2(400.0, 300.0);
+                    let pos = ctx.input(|i| {
+                        i.viewport()
+                            .monitor_size
+                            .map(|size| egui::pos2((size.x - window_size.x) / 2.0, (size.y - window_size.y) / 2.0))
+                            .unwrap_or_else(|| egui::pos2(100.0, 100.0))
+                    });
+
+                    if let Some(common) = &self.screenshot_common {
+                        if let Ok(mut visible) = common.window_state.visible.lock() {
+                            *visible = true;
+                        }
+                    }
+
                     ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(false));
+                    ctx.send_viewport_cmd(egui::ViewportCommand::MinInnerSize(min_size));
+                    ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(window_size));
+                    ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(pos));
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
                     ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+                    ctx.request_repaint();
                 }
                 TrayAction::Quit => {
                     // 标记允许真正退出
